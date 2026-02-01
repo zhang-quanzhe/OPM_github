@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>87Rb 原子极化模拟 - 10s 循环演示版</title>
+    <style>
+        body { 
+            margin: 0; 
+            background: #000; 
+            color: #fff; 
+            font-family: 'Segoe UI', sans-serif; 
+            overflow: hidden; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            height: 100vh; 
+        }
+
+        /* 固定比例容器 */
+        #sim-container {
+            position: relative;
+            width: 800px;
+            height: 600px;
+            background: #020205;
+            border-radius: 12px;
+            box-shadow: 0 0 50px rgba(0,0,0,0.8);
+            overflow: hidden;
+        }
+
+        canvas { display: block; }
+
+        .ui-header { position: absolute; top: 25px; width: 100%; text-align: center; pointer-events: none; z-index: 10; }
+        .ui-header h2 { margin: 0; font-size: 24px; color: #00e5ff; letter-spacing: 3px; }
+
+        /* 持续计时器 */
+        .timer-panel { position: absolute; left: 30px; top: 30px; font-family: 'Courier New', monospace; text-align: left; z-index: 10; border-left: 3px solid #00e5ff; padding-left: 15px; }
+        .timer-value { font-size: 38px; color: #00e5ff; font-weight: bold; line-height: 1; }
+        .timer-label { font-size: 11px; color: #555; text-transform: uppercase; letter-spacing: 1px; }
+
+        /* 状态指示灯 */
+        .status-indicator { position: absolute; bottom: 30px; left: 30px; font-size: 12px; color: #888; font-family: monospace; }
+        #pumpStatus { color: #555; font-weight: bold; transition: 0.3s; }
+        #pumpStatus.active { color: #00e5ff; text-shadow: 0 0 10px rgba(0,229,255,0.5); }
+
+        .stats-text { position: absolute; right: 30px; top: 35px; font-family: monospace; font-size: 14px; color: #444; text-align: right; }
+    </style>
+</head>
+<body>
+
+    <div id="sim-container">
+        <div class="ui-header">
+            <h2>87Rb 原子布居统计 (10s 循环演示)</h2>
+        </div>
+
+        <div class="timer-panel">
+            <div class="timer-label">TOTAL RUNNING TIME</div>
+            <div class="timer-value" id="timerDisplay">0.0s</div>
+        </div>
+
+        <div class="status-indicator">
+            PUMPING SYSTEM: <span id="pumpStatus">OFF</span>
+        </div>
+
+        <div class="stats-text" id="atomStatsText">Pop: 0|0|0|0|0</div>
+
+        <canvas id="canvas"></canvas>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const timerDisplay = document.getElementById('timerDisplay');
+        const pumpStatusEl = document.getElementById('pumpStatus');
+
+        const WIDTH = 800;
+        const HEIGHT = 600;
+        canvas.width = WIDTH;
+        canvas.height = HEIGHT;
+
+        const ATOMS_PER_LEVEL = 40; 
+        const BALL_RADIUS = 3.0;    
+        const ATOM_GAP = 8;       
+        const LEVELS_G = [-2, -1, 0, 1, 2];
+        const LEVELS_E = [-1, 0, 1];
+        
+        const SPACING = 110; 
+        const G_Y = 460;     
+        const E_Y = 180;     
+
+        const PUMP_RATE = 0.04;      
+        const RELAXATION_PROB = 0.0075; 
+
+        let atoms = [];
+        let isPumping = false;
+        let counts = { "-2":0, "-1":0, "0":0, "1":0, "2":0 };
+        
+        let absoluteStartTime = Date.now();
+
+        class Atom {
+            constructor(m) {
+                this.m = m;
+                this.state = 'g'; 
+                this.x = (WIDTH/2 + m * SPACING) + (Math.random()-0.5)*50;
+                this.y = G_Y - 50 - Math.random()*100;
+                this.speed = 0.05 + Math.random()*0.06;
+            }
+
+            getStackPos() {
+                const siblings = atoms.filter(a => a.state === 'g' && a.m === this.m);
+                const idx = siblings.indexOf(this);
+                let maxW = Math.ceil((Math.sqrt(1 + 8 * siblings.length) - 1) / 2);
+                let curIdx = idx, layer = 0, layerW = maxW;
+                while (curIdx >= layerW && layerW > 0) {
+                    curIdx -= layerW; layer++; layerW--;
+                }
+                return {
+                    x: (WIDTH/2 + this.m * SPACING) + (curIdx - (layerW - 1) / 2) * ATOM_GAP,
+                    y: G_Y - BALL_RADIUS - layer * (ATOM_GAP * 0.86)
+                };
+            }
+
+            update() {
+                if (this.state === 'g') {
+                    const pos = this.getStackPos();
+                    this.x += (pos.x - this.x) * this.speed;
+                    this.y += (pos.y - this.y) * this.speed;
+                    if (Math.random() < RELAXATION_PROB) {
+                        this.m = LEVELS_G[Math.floor(Math.random() * 5)];
+                    }
+                    if (isPumping && LEVELS_E.includes(this.m) && Math.random() < PUMP_RATE) {
+                        this.state = 'rising';
+                        this.targetY = E_Y - Math.random() * 15;
+                    }
+                } 
+                else if (this.state === 'rising') {
+                    this.y += (this.targetY - this.y) * this.speed * 2.5;
+                    this.x += ((WIDTH/2 + this.m * SPACING) - this.x) * this.speed;
+                    if (Math.abs(this.y - this.targetY) < 1) {
+                        this.state = 'e';
+                        this.timer = 8 + Math.random() * 8;
+                    }
+                } 
+                else if (this.state === 'e') {
+                    if (--this.timer <= 0) {
+                        this.state = 'falling';
+                        const choices = [this.m-1, this.m, this.m+1].filter(m => LEVELS_G.includes(m));
+                        this.m = choices[Math.floor(Math.random()*choices.length)];
+                    }
+                } 
+                else if (this.state === 'falling') {
+                    const pos = this.getStackPos();
+                    this.x += (pos.x - this.x) * this.speed;
+                    this.y += (pos.y - this.y) * this.speed;
+                    if (Math.abs(this.y - pos.y) < 1) this.state = 'g';
+                }
+            }
+
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, BALL_RADIUS, 0, 7);
+                if (this.state === 'g') {
+                    ctx.fillStyle = `#aaa`;
+                } else {
+                    ctx.fillStyle = this.state === 'rising' ? '#00e5ff' : '#ff9800';
+                    ctx.shadowBlur = 8; ctx.shadowColor = ctx.fillStyle;
+                }
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+        }
+
+        function drawHistogram() {
+            LEVELS_G.forEach(m => counts[m] = 0);
+            atoms.forEach(a => { if(a.state === 'g') counts[a.m]++; });
+
+            const maxBarHeight = 110;
+            const barWidth = 40;
+
+            LEVELS_G.forEach(m => {
+                const x = WIDTH / 2 + m * SPACING;
+                const ratio = counts[m] / (ATOMS_PER_LEVEL * 2.5); 
+                const h = ratio * maxBarHeight;
+
+                ctx.fillStyle = 'rgba(255,255,255,0.03)';
+                ctx.fillRect(x - barWidth/2, G_Y + 35, barWidth, maxBarHeight);
+
+                const grad = ctx.createLinearGradient(0, G_Y + 35, 0, G_Y + 35 + h);
+                grad.addColorStop(0, 'rgba(0, 229, 255, 0.6)');
+                grad.addColorStop(1, 'rgba(0, 229, 255, 0.1)');
+                
+                ctx.fillStyle = grad;
+                ctx.fillRect(x - barWidth/2, G_Y + 35, barWidth, h);
+
+                ctx.fillStyle = 'rgba(255,255,255,0.4)';
+                ctx.font = '11px monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText(counts[m], x, G_Y + 50 + h);
+                ctx.fillStyle = 'rgba(255,255,255,0.2)';
+                ctx.fillText(`m=${m}`, x, G_Y + 25);
+            });
+
+            document.getElementById('atomStatsText').innerText = 
+                `Pop: ${LEVELS_G.map(m => counts[m]).join(' | ')}`;
+        }
+
+        function initAtoms() {
+            atoms = [];
+            LEVELS_G.forEach(m => {
+                for (let i = 0; i < ATOMS_PER_LEVEL; i++) atoms.push(new Atom(m));
+            });
+        }
+
+        function animate() {
+            let currentTime = (Date.now() - absoluteStartTime) / 1000;
+
+            // --- 10秒自动循环重置逻辑 ---
+            if (currentTime >= 10.0) {
+                absoluteStartTime = Date.now();
+                currentTime = 0;
+                initAtoms(); // 重新分布原子
+                isPumping = false; // 确保抽运从关闭开始
+                pumpStatusEl.innerText = "OFF (RESETTING...)";
+            }
+
+            timerDisplay.innerText = currentTime.toFixed(1) + "s";
+
+            // --- 自动化时间轴控制 ---
+            if (currentTime >= 2.0 && currentTime < 8.0) {
+                if (!isPumping) {
+                    isPumping = true;
+                    pumpStatusEl.innerText = "ON (2s - 8s)";
+                    pumpStatusEl.classList.add('active');
+                }
+            } else {
+                if (isPumping) {
+                    isPumping = false;
+                    pumpStatusEl.innerText = currentTime >= 8.0 ? "OFF (Relaxing...)" : "OFF";
+                    pumpStatusEl.classList.remove('active');
+                }
+            }
+
+            ctx.fillStyle = 'rgba(2, 2, 5, 0.4)';
+            ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+            ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+            LEVELS_G.forEach(m => {
+                const x = WIDTH/2 + m * SPACING;
+                ctx.beginPath(); ctx.moveTo(x-45, G_Y); ctx.lineTo(x+45, G_Y); ctx.stroke();
+            });
+
+            LEVELS_E.forEach(m => {
+                const x = WIDTH/2 + m * SPACING;
+                ctx.strokeStyle = isPumping ? 'rgba(0, 229, 255, 0.7)' : 'rgba(0, 229, 255, 0.05)';
+                ctx.beginPath(); ctx.moveTo(x-40, E_Y); ctx.lineTo(x+40, E_Y); ctx.stroke();
+                if (isPumping) {
+                    const g = ctx.createLinearGradient(0, E_Y, 0, G_Y);
+                    g.addColorStop(0, 'rgba(0, 229, 255, 0.12)');
+                    g.addColorStop(1, 'transparent');
+                    ctx.fillStyle = g; ctx.fillRect(x-35, E_Y, 70, G_Y-E_Y);
+                }
+            });
+
+            atoms.forEach(a => { a.update(); a.draw(); });
+            drawHistogram();
+            requestAnimationFrame(animate);
+        }
+
+        initAtoms(); 
+        animate();
+    </script>
+</body>
+</html>

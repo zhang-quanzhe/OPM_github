@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>87Rb 原子极化模拟 - 大规模粒子版</title>
+    <style>
+        body { margin: 0; background: #020205; color: #fff; font-family: sans-serif; overflow: hidden; display: flex; flex-direction: column; align-items: center; }
+        canvas { display: block; }
+        .ui-panel { position: absolute; top: 20px; text-align: center; pointer-events: none; }
+        .controls { position: absolute; bottom: 40px; display: flex; gap: 20px; background: rgba(255,255,255,0.05); padding: 15px 30px; border-radius: 50px; backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1); }
+        button { padding: 10px 25px; font-size: 14px; cursor: pointer; border: none; border-radius: 20px; background: #222; color: white; transition: 0.3s; pointer-events: auto; }
+        button:hover { background: #444; transform: translateY(-2px); }
+        #pumpBtn.on { background: #00e5ff; color: #000; font-weight: bold; box-shadow: 0 0 30px rgba(0, 229, 255, 0.5); }
+        .counter { position: absolute; left: 20px; bottom: 20px; font-family: monospace; font-size: 14px; color: #555; }
+    </style>
+</head>
+<body>
+
+    <div class="ui-panel">
+        <h2 style="margin:0; letter-spacing: 2px; color: #00e5ff;">87Rb 大规模原子极化模拟</h2>
+        <p style="opacity: 0.6; font-size: 12px;">已增加原子密度 | 高功率抽运 | 全能级弛豫</p>
+    </div>
+
+    <div class="counter" id="atomCounter">Atoms: 0</div>
+
+    <canvas id="canvas"></canvas>
+    
+    <div class="controls">
+        <button id="pumpBtn">开启高功率抽运</button>
+        <button id="resetBtn">重置原子</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        // --- 参数调优 ---
+        const ATOMS_PER_LEVEL = 35; // 每个能级初始原子数增加
+        const BALL_RADIUS = 2.8;    // 稍微缩小，提升精细感
+        const ATOM_GAP = 7.5;       // 调紧间距
+        const LEVELS_G = [-2, -1, 0, 1, 2];
+        const LEVELS_E = [-1, 0, 1];
+        
+        const PUMP_RATE = 0.025; 
+        const RELAXATION_PROB = 0.0012; 
+
+        let atoms = [];
+        let isPumping = false;
+        let width, height, spacing, gY, eY;
+
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+            spacing = Math.min(width / 7, 160);
+            gY = height * 0.85;
+            eY = height * 0.25;
+        }
+
+        class Atom {
+            constructor(m, index) {
+                this.init(m, index);
+            }
+
+            init(m, index) {
+                this.m = m;
+                this.state = 'g'; 
+                this.x = this.getBaseX(m) + (Math.random() - 0.5) * 50;
+                this.y = gY - 100 - Math.random() * 200;
+                this.speed = 0.05 + Math.random() * 0.05;
+                this.color = { h: 200, s: 0, l: 65 };
+            }
+
+            getBaseX(m) { return width / 2 + m * spacing; }
+
+            // 动态正金字塔算法
+            getStackPos(m) {
+                const siblings = atoms.filter(a => a.state === 'g' && a.m === m);
+                const totalInM = siblings.length;
+                const idx = siblings.indexOf(this);
+                if (idx === -1) return { x: this.getBaseX(m), y: gY };
+
+                // 动态计算底座宽度 W
+                let maxBottomWidth = Math.ceil((Math.sqrt(1 + 8 * totalInM) - 1) / 2);
+                let currentIdx = idx;
+                let layer = 0;
+                let layerWidth = maxBottomWidth;
+                
+                while (currentIdx >= layerWidth && layerWidth > 0) {
+                    currentIdx -= layerWidth;
+                    layer++;
+                    layerWidth--;
+                }
+
+                const xOffset = (currentIdx - (layerWidth - 1) / 2) * ATOM_GAP;
+                const yOffset = layer * (ATOM_GAP * 0.86);
+
+                return {
+                    x: this.getBaseX(m) + xOffset,
+                    y: gY - BALL_RADIUS - yOffset
+                };
+            }
+
+            update() {
+                if (this.state === 'g') {
+                    const pos = this.getStackPos(this.m);
+                    this.x += (pos.x - this.x) * this.speed;
+                    this.y += (pos.y - this.y) * this.speed;
+                    
+                    if (Math.random() < RELAXATION_PROB) {
+                        const targetM = LEVELS_G[Math.floor(Math.random() * LEVELS_G.length)];
+                        if (targetM !== this.m) this.m = targetM;
+                    }
+                    
+                    if (isPumping && LEVELS_E.includes(this.m)) {
+                        if (Math.random() < PUMP_RATE) {
+                            this.state = 'rising';
+                            this.targetY = eY - Math.random() * 15;
+                        }
+                    }
+                    this.color.s = 0; this.color.l = 65;
+                } 
+                else if (this.state === 'rising') {
+                    this.y += (this.targetY - this.y) * this.speed * 1.5;
+                    this.x += (this.getBaseX(this.m) - this.x) * this.speed;
+                    this.color.h = 180; this.color.s = 100; this.color.l = 60;
+                    if (Math.abs(this.y - this.targetY) < 1) {
+                        this.state = 'e';
+                        this.timer = 10 + Math.random() * 15;
+                    }
+                } 
+                else if (this.state === 'e') {
+                    this.timer--;
+                    if (this.timer <= 0) {
+                        this.state = 'falling';
+                        const choices = [this.m - 1, this.m, this.m + 1].filter(m => LEVELS_G.includes(m));
+                        this.m = choices[Math.floor(Math.random() * choices.length)];
+                    }
+                } 
+                else if (this.state === 'falling') {
+                    this.color.h = 30; this.color.s = 100; this.color.l = 60;
+                    const pos = this.getStackPos(this.m);
+                    this.x += (pos.x - this.x) * this.speed;
+                    this.y += (pos.y - this.y) * this.speed;
+                    if (Math.abs(this.y - pos.y) < 1) this.state = 'g';
+                }
+            }
+
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, BALL_RADIUS, 0, Math.PI * 2);
+                ctx.fillStyle = `hsl(${this.color.h}, ${this.color.s}%, ${this.color.l}%)`;
+                if (this.state !== 'g') {
+                    ctx.shadowBlur = 10;
+                    ctx.shadowColor = `hsl(${this.color.h}, 100%, 50%)`;
+                }
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+        }
+
+        function init() {
+            atoms = [];
+            LEVELS_G.forEach(m => {
+                for (let i = 0; i < ATOMS_PER_LEVEL; i++) {
+                    atoms.push(new Atom(m, i));
+                }
+            });
+            document.getElementById('atomCounter').innerText = `Atoms: ${atoms.length}`;
+        }
+
+        function animate() {
+            ctx.fillStyle = 'rgba(2, 2, 5, 0.4)';
+            ctx.fillRect(0, 0, width, height);
+
+            // 基态线
+            ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+            LEVELS_G.forEach(m => {
+                const x = width/2 + m * spacing;
+                ctx.beginPath(); ctx.moveTo(x-50, gY); ctx.lineTo(x+50, gY); ctx.stroke();
+            });
+
+            // 激发线和光束
+            LEVELS_E.forEach(m => {
+                const x = width/2 + m * spacing;
+                ctx.strokeStyle = isPumping ? 'rgba(0, 229, 255, 1)' : 'rgba(0, 229, 255, 0.2)';
+                ctx.lineWidth = 2;
+                ctx.beginPath(); ctx.moveTo(x-40, eY); ctx.lineTo(x+40, eY); ctx.stroke();
+                if (isPumping) {
+                    const g = ctx.createLinearGradient(0, eY, 0, gY);
+                    g.addColorStop(0, 'rgba(0, 229, 255, 0.15)');
+                    g.addColorStop(1, 'rgba(0, 229, 255, 0)');
+                    ctx.fillStyle = g;
+                    ctx.fillRect(x-35, eY, 70, gY-eY);
+                }
+            });
+
+            atoms.forEach(a => {
+                a.update();
+                a.draw();
+            });
+
+            requestAnimationFrame(animate);
+        }
+
+        window.addEventListener('resize', () => { resize(); init(); });
+        document.getElementById('pumpBtn').onclick = (e) => {
+            isPumping = !isPumping;
+            e.target.classList.toggle('on');
+            e.target.innerText = isPumping ? "停止高功率抽运" : "开启高功率抽运";
+        };
+        document.getElementById('resetBtn').onclick = init;
+
+        resize();
+        init();
+        animate();
+    </script>
+</body>
+</html>
